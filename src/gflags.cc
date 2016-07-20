@@ -104,6 +104,7 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>     // for pair<>
 #include <vector>
@@ -498,6 +499,7 @@ class CommandLineFlag {
   // Note: we take over memory-ownership of current_val and default_val.
   CommandLineFlag(const char* name, const char* help, const char* filename,
                   FlagValue* current_val, FlagValue* default_val);
+  CommandLineFlag(CommandLineFlag&& other);
   ~CommandLineFlag();
 
   const char* name() const { return name_; }
@@ -540,8 +542,9 @@ class CommandLineFlag {
   // the proper type.  This may be NULL to mean we have no validate_fn.
   ValidateFnProto validate_fn_proto_;
 
-  CommandLineFlag(const CommandLineFlag&);   // no copying!
-  void operator=(const CommandLineFlag&);
+  CommandLineFlag(const CommandLineFlag&) = delete;   // no copying!
+  void operator=(const CommandLineFlag&) = delete;
+  void operator=(const CommandLineFlag&&) = delete;
 };
 
 CommandLineFlag::CommandLineFlag(const char* name, const char* help,
@@ -550,6 +553,8 @@ CommandLineFlag::CommandLineFlag(const char* name, const char* help,
     : name_(name), help_(help), file_(filename), modified_(false),
       defvalue_(default_val), current_(current_val), validate_fn_proto_(NULL) {
 }
+
+CommandLineFlag::CommandLineFlag(CommandLineFlag&& other) = default;
 
 CommandLineFlag::~CommandLineFlag() {
   delete current_;
@@ -628,25 +633,9 @@ bool CommandLineFlag::Validate(const FlagValue& value) const {
 //    the function; otherwise, you should *not* hold the lock, and
 //    the function will acquire it itself if needed.
 // --------------------------------------------------------------------
-
-struct StringCmp {  // Used by the FlagRegistry map class to compare char*'s
-  bool operator() (const char* s1, const char* s2) const {
-    return (strcmp(s1, s2) < 0);
-  }
-};
-
-
 class FlagRegistry {
  public:
   FlagRegistry() {
-  }
-  ~FlagRegistry() {
-    // Not using STLDeleteElements as that resides in util and this
-    // class is base.
-    for (FlagMap::iterator p = flags_.begin(), e = flags_.end(); p != e; ++p) {
-      CommandLineFlag* flag = p->second;
-      delete flag;
-    }
   }
 
   static void DeleteGlobalRegistry() {
@@ -690,8 +679,13 @@ class FlagRegistry {
   friend class CommandLineFlagParser;    // for ValidateAllFlags
   friend void GFLAGS_NAMESPACE::GetAllFlags(vector<CommandLineFlagInfo>*);
 
+  struct StringCmp {  // Used by the FlagRegistry map class to compare char*'s
+    bool operator() (const char* s1, const char* s2) const {
+      return (strcmp(s1, s2) < 0);
+    }
+  };
   // The map from name to flag, for FindFlagLocked().
-  typedef map<const char*, CommandLineFlag*, StringCmp> FlagMap;
+  typedef map<const char*, std::unique_ptr<CommandLineFlag>, StringCmp> FlagMap;
   typedef FlagMap::iterator FlagIterator;
   typedef FlagMap::const_iterator FlagConstIterator;
   FlagMap flags_;
@@ -708,8 +702,8 @@ class FlagRegistry {
   static void InitGlobalRegistry();
 
   // Disallow
-  FlagRegistry(const FlagRegistry&);
-  FlagRegistry& operator=(const FlagRegistry&);
+  FlagRegistry(const FlagRegistry&) = delete;
+  FlagRegistry& operator=(const FlagRegistry&) = delete;
 };
 
 class FlagRegistryLock {
@@ -724,7 +718,7 @@ class FlagRegistryLock {
 void FlagRegistry::RegisterFlag(CommandLineFlag* flag) {
   Lock();
   pair<FlagIterator, bool> ins =
-    flags_.insert(pair<const char*, CommandLineFlag*>(flag->name(), flag));
+      flags_.emplace(flag->name(), std::unique_ptr<CommandLineFlag>(flag));
   if (ins.second == false) {   // means the name was already in the map
     if (strcmp(ins.first->second->filename(), flag->filename()) != 0) {
       ReportError(DIE, "ERROR: flag '%s' was defined more than once "
@@ -750,7 +744,7 @@ CommandLineFlag* FlagRegistry::FindFlagLocked(const char* name) {
   if (i == flags_.end()) {
     return NULL;
   } else {
-    return i->second;
+    return i->second.get();
   }
 }
 
@@ -824,7 +818,7 @@ CommandLineFlag* FlagRegistry::SplitArgumentLocked(const char* arg,
 bool TryParseLocked(const CommandLineFlag* flag, FlagValue* flag_value,
                     const char* value, string* msg) {
   // Use tenative_value, not flag_value, until we know value is valid.
-  FlagValue* tentative_value = flag_value->New();
+  std::unique_ptr<FlagValue> tentative_value(flag_value->New());
   if (!tentative_value->ParseFrom(value)) {
     if (msg) {
       StringAppendF(msg,
@@ -832,7 +826,6 @@ bool TryParseLocked(const CommandLineFlag* flag, FlagValue* flag_value,
                     kError, value,
                     flag->type_name(), flag->name());
     }
-    delete tentative_value;
     return false;
   } else if (!flag->Validate(*tentative_value)) {
     if (msg) {
@@ -841,7 +834,6 @@ bool TryParseLocked(const CommandLineFlag* flag, FlagValue* flag_value,
           kError, tentative_value->ToString().c_str(),
           flag->name());
     }
-    delete tentative_value;
     return false;
   } else {
     flag_value->CopyFrom(*tentative_value);
@@ -849,7 +841,6 @@ bool TryParseLocked(const CommandLineFlag* flag, FlagValue* flag_value,
       StringAppendF(msg, "%s set to %s\n",
                     flag->name(), flag_value->ToString().c_str());
     }
-    delete tentative_value;
     return true;
   }
 }
@@ -1004,7 +995,7 @@ static void ParseFlagList(const char* value, vector<string>* flags) {
     if (value[0] == '-')
       ReportError(DIE, "ERROR: flag \"%*s\" begins with '-'\n", len, value);
 
-    flags->push_back(string(value, len));
+    flags->emplace_back(value, len);
   }
 }
 
@@ -1163,8 +1154,8 @@ string CommandLineFlagParser::ProcessFromenvLocked(const string& flagval,
     }
 
     const string envname = string("FLAGS_") + string(flagname);
-	string envval;
-	if (!SafeGetEnv(envname.c_str(), envval)) {
+  string envval;
+  if (!SafeGetEnv(envname.c_str(), envval)) {
       if (errors_are_fatal) {
         error_flags_[flagname] = (string(kError) + envname +
                                   " not found in environment\n");
@@ -1369,7 +1360,7 @@ T GetFromEnv(const char *varname, const char* type, T dflt) {
     if (!ifv.ParseFrom(valstr.c_str())) {
       ReportError(DIE, "ERROR: error parsing env variable '%s' with value '%s'\n",
                   varname, valstr.c_str());
-	}
+  }
     return OTHER_VALUE_AS(ifv, T);
   } else return dflt;
 }
@@ -1645,12 +1636,6 @@ class FlagSaverImpl {
   // Constructs an empty FlagSaverImpl object.
   explicit FlagSaverImpl(FlagRegistry* main_registry)
       : main_registry_(main_registry) { }
-  ~FlagSaverImpl() {
-    // reclaim memory from each of our CommandLineFlags
-    vector<CommandLineFlag*>::const_iterator it;
-    for (it = backup_registry_.begin(); it != backup_registry_.end(); ++it)
-      delete *it;
-  }
 
   // Saves the flag states from the flag registry into this object.
   // It's an error to call this more than once.
@@ -1658,17 +1643,15 @@ class FlagSaverImpl {
   void SaveFromRegistry() {
     FlagRegistryLock frl(main_registry_);
     assert(backup_registry_.empty());   // call only once!
-    for (FlagRegistry::FlagConstIterator it = main_registry_->flags_.begin();
-         it != main_registry_->flags_.end();
-         ++it) {
-      const CommandLineFlag* main = it->second;
+    for (const auto& it : main_registry_->flags_) {
+      const CommandLineFlag& main = *it.second;
       // Sets up all the const variables in backup correctly
-      CommandLineFlag* backup = new CommandLineFlag(
-          main->name(), main->help(), main->filename(),
-          main->current_->New(), main->defvalue_->New());
+      CommandLineFlag backup(main.name(), main.help(), main.filename(),
+                             main.current_->New(), main.defvalue_->New());
       // Sets up all the non-const variables in backup correctly
-      backup->CopyFrom(*main);
-      backup_registry_.push_back(backup);   // add it to a convenient list
+      backup.CopyFrom(main);
+      // Add it to a convenient list.
+      backup_registry_.emplace_back(std::move(backup));
     }
   }
 
@@ -1679,20 +1662,20 @@ class FlagSaverImpl {
   void RestoreToRegistry() {
     FlagRegistryLock frl(main_registry_);
     vector<CommandLineFlag*>::const_iterator it;
-    for (it = backup_registry_.begin(); it != backup_registry_.end(); ++it) {
-      CommandLineFlag* main = main_registry_->FindFlagLocked((*it)->name());
+    for (const auto& backup : backup_registry_) {
+      CommandLineFlag* main = main_registry_->FindFlagLocked(backup.name());
       if (main != NULL) {       // if NULL, flag got deleted from registry(!)
-        main->CopyFrom(**it);
+        main->CopyFrom(backup);
       }
     }
   }
 
  private:
   FlagRegistry* const main_registry_;
-  vector<CommandLineFlag*> backup_registry_;
+  vector<CommandLineFlag> backup_registry_;
 
-  FlagSaverImpl(const FlagSaverImpl&);  // no copying!
-  void operator=(const FlagSaverImpl&);
+  FlagSaverImpl(const FlagSaverImpl&) = delete;  // no copying!
+  void operator=(const FlagSaverImpl&) = delete;
 };
 
 FlagSaver::FlagSaver()
@@ -1785,13 +1768,11 @@ bool AppendFlagsIntoFile(const string& filename, const char *prog_name) {
   vector<CommandLineFlagInfo> flags;
   GetAllFlags(&flags);
   // But we don't want --flagfile, which leads to weird recursion issues
-  vector<CommandLineFlagInfo>::iterator i;
-  for (i = flags.begin(); i != flags.end(); ++i) {
-    if (strcmp(i->name.c_str(), "flagfile") == 0) {
-      flags.erase(i);
-      break;
-    }
-  }
+  const auto flagfile_it =
+      std::find_if(flags.cbegin(), flags.cend(),
+                   [](const auto& flag) { return flag.name == "flagfile"; });
+  if (flagfile_it != flags.cend())
+    flags.erase(flagfile_it);
   fprintf(fp, "%s", TheseCommandlineFlagsIntoString(flags).c_str());
 
   fclose(fp);

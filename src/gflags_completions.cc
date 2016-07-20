@@ -336,7 +336,7 @@ static void CanonicalizeCursorWordAndSearchOptions(
 // Returns true if a char was removed
 static bool RemoveTrailingChar(string *str, char c) {
   if (str->empty()) return false;
-  if ((*str)[str->size() - 1] == c) {
+  if (str->back() == c) {
     *str = str->substr(0, str->size() - 1);
     return true;
   }
@@ -353,23 +353,21 @@ static void FindMatchingFlags(
     string *longest_common_prefix) {
   all_matches->clear();
   bool first_match = true;
-  for (vector<CommandLineFlagInfo>::const_iterator it = all_flags.begin();
-      it != all_flags.end();
-      ++it) {
-    if (DoesSingleFlagMatch(*it, options, match_token)) {
-      all_matches->insert(&*it);
+  for (const auto& flag : all_flags) {
+    if (DoesSingleFlagMatch(flag, options, match_token)) {
+      all_matches->insert(&flag);
       if (first_match) {
         first_match = false;
-        *longest_common_prefix = it->name;
+        *longest_common_prefix = flag.name;
       } else {
-        if (longest_common_prefix->empty() || it->name.empty()) {
+        if (longest_common_prefix->empty() || flag.name.empty()) {
           longest_common_prefix->clear();
           continue;
         }
         string::size_type pos = 0;
         while (pos < longest_common_prefix->size() &&
-            pos < it->name.size() &&
-            (*longest_common_prefix)[pos] == it->name[pos])
+            pos < flag.name.size() &&
+            (*longest_common_prefix)[pos] == flag.name[pos])
           ++pos;
         longest_common_prefix->erase(pos);
       }
@@ -466,9 +464,8 @@ static void CategorizeAllMatchingFlags(
   }
 }
 
-static void PushNameWithSuffix(vector<string>* suffixes, const char* suffix) {
-  suffixes->push_back(
-      StringPrintf("/%s%s", ProgramInvocationShortName(), suffix));
+static std::string CreateNameWithSuffix(const char* suffix) {
+  return StringPrintf("/%s%s", ProgramInvocationShortName(), suffix);
 }
 
 static void TryFindModuleAndPackageDir(
@@ -478,54 +475,33 @@ static void TryFindModuleAndPackageDir(
   module->clear();
   package_dir->clear();
 
-  vector<string> suffixes;
-  // TODO(user): There's some inherant ambiguity here - multiple directories
-  // could share the same trailing folder and file structure (and even worse,
-  // same file names), causing us to be unsure as to which of the two is the
-  // actual package for this binary.  In this case, we'll arbitrarily choose.
-  PushNameWithSuffix(&suffixes, ".");
-  PushNameWithSuffix(&suffixes, "-main.");
-  PushNameWithSuffix(&suffixes, "_main.");
-  // These four are new but probably merited?
-  PushNameWithSuffix(&suffixes, "-test.");
-  PushNameWithSuffix(&suffixes, "_test.");
-  PushNameWithSuffix(&suffixes, "-unittest.");
-  PushNameWithSuffix(&suffixes, "_unittest.");
+  const vector<const string> suffixes = {
+    // TODO(user): There's some inherant ambiguity here - multiple directories
+    // could share the same trailing folder and file structure (and even worse,
+    // same file names), causing us to be unsure as to which of the two is the
+    // actual package for this binary.  In this case, we'll arbitrarily choose.
+    CreateNameWithSuffix("."),
+    CreateNameWithSuffix("-main."),
+    CreateNameWithSuffix("_main."),
+    // These four are new but probably merited?
+    CreateNameWithSuffix("-test."),
+    CreateNameWithSuffix("_test."),
+    CreateNameWithSuffix("-unittest."),
+    CreateNameWithSuffix("_unittest.")
+  };
 
-  for (vector<CommandLineFlagInfo>::const_iterator it = all_flags.begin();
-      it != all_flags.end();
-      ++it) {
-    for (vector<string>::const_iterator suffix = suffixes.begin();
-        suffix != suffixes.end();
-        ++suffix) {
+  for (const auto& flag : all_flags) {
+    for (const auto& suffix : suffixes) {
       // TODO(user): Make sure the match is near the end of the string
-      if (it->filename.find(*suffix) != string::npos) {
-        *module = it->filename;
-        string::size_type sep = it->filename.rfind(PATH_SEPARATOR);
-        *package_dir = it->filename.substr(0, (sep == string::npos) ? 0 : sep);
+      if (flag.filename.find(suffix) != string::npos) {
+        *module = flag.filename;
+        string::size_type sep = flag.filename.rfind(PATH_SEPARATOR);
+        *package_dir = flag.filename.substr(0, (sep == string::npos) ? 0 : sep);
         return;
       }
     }
   }
 }
-
-// Can't specialize template type on a locally defined type.  Silly C++...
-struct DisplayInfoGroup {
-  const char* header;
-  const char* footer;
-  set<const CommandLineFlagInfo *> *group;
-
-  int SizeInLines() const {
-    int size_in_lines = static_cast<int>(group->size()) + 1;
-    if (strlen(header) > 0) {
-      size_in_lines++;
-    }
-    if (strlen(footer) > 0) {
-      size_in_lines++;
-    }
-    return size_in_lines;
-  }
-};
 
 // 4) Finalize and trim output flag set
 static void FinalizeCompletionOutput(
@@ -533,6 +509,22 @@ static void FinalizeCompletionOutput(
     CompletionOptions *options,
     NotableFlags *notable_flags,
     vector<string> *completions) {
+  struct DisplayInfoGroup {
+    const char* header;
+    const char* footer;
+    set<const CommandLineFlagInfo *> *group;
+
+    int SizeInLines() const {
+      int size_in_lines = static_cast<int>(group->size()) + 1;
+      if (strlen(header) > 0) {
+        size_in_lines++;
+      }
+      if (strlen(footer) > 0) {
+        size_in_lines++;
+      }
+      return size_in_lines;
+    }
+  };
 
   // We want to output lines in groups.  Each group needs to be indented
   // the same to keep its lines together.  Unless otherwise required,
@@ -643,17 +635,14 @@ static void RetrieveUnusedFlags(
     set<const CommandLineFlagInfo *> *unused_flags) {
   // Remove from 'matching_flags' set all members of the sets of
   // flags we've already printed (specifically, those in notable_flags)
-  for (set<const CommandLineFlagInfo *>::const_iterator it =
-        matching_flags.begin();
-      it != matching_flags.end();
-      ++it) {
-    if (notable_flags.perfect_match_flag.count(*it) ||
-        notable_flags.module_flags.count(*it) ||
-        notable_flags.package_flags.count(*it) ||
-        notable_flags.most_common_flags.count(*it) ||
-        notable_flags.subpackage_flags.count(*it))
+  for (auto* flag_info : matching_flags) {
+    if (notable_flags.perfect_match_flag.count(flag_info) ||
+        notable_flags.module_flags.count(flag_info) ||
+        notable_flags.package_flags.count(flag_info) ||
+        notable_flags.most_common_flags.count(flag_info) ||
+        notable_flags.subpackage_flags.count(flag_info))
       continue;
-    unused_flags->insert(*it);
+    unused_flags->insert(flag_info);
   }
 }
 
