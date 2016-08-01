@@ -216,7 +216,7 @@ namespace fLI {
   int32 FLAGS_tldflag1 = FLAGS_nonotldflag1;
   int32 FLAGS_notldflag1 = FLAGS_nonotldflag1;
   static FlagRegisterer o_tldflag1(
-    "tldflag1", "int32",
+    "tldflag1",
     "should show up in --helpshort", "gflags_unittest.cc",
     &FLAGS_tldflag1, &FLAGS_notldflag1);
 }
@@ -227,7 +227,7 @@ namespace fLI {
   int32 FLAGS_tldflag2 = FLAGS_nonotldflag2;
   int32 FLAGS_notldflag2 = FLAGS_nonotldflag2;
   static FlagRegisterer o_tldflag2(
-    "tldflag2", "int32",
+    "tldflag2",
     "should show up in --helpshort", "gflags_unittest.",
     &FLAGS_tldflag2, &FLAGS_notldflag2);
 }
@@ -601,7 +601,7 @@ TEST(SetFlagValueTest, IllegalValues) {
             SetCommandLineOption("test_bool", "12"));
 
   EXPECT_EQ("",
-            SetCommandLineOption("test_uint32", "1970"));
+            SetCommandLineOption("test_uint32", "-1970"));
 
   EXPECT_EQ("",
             SetCommandLineOption("test_int32", "7000000000000"));
@@ -862,7 +862,7 @@ TEST(FlagSaverTest, CanSaveVariousTypedFlagValues) {
   EXPECT_EQ(2, FLAGS_test_uint32);
   EXPECT_EQ(-3, FLAGS_test_int64);
   EXPECT_EQ(4, FLAGS_test_uint64);
-  EXPECT_DOUBLE_EQ(4.0, FLAGS_test_double);
+  EXPECT_DOUBLE_EQ(5.0, FLAGS_test_double);
   EXPECT_EQ("good", FLAGS_test_string);
 }
 
@@ -1355,7 +1355,7 @@ TEST(ParseCommandLineFlagsWrongFields,
   // addresses of these variables will be overwritten...  Stack smash!
   static bool current_storage;
   static bool defvalue_storage;
-  FlagRegisterer fr("flag_name", "bool", 0, "filename",
+  FlagRegisterer fr("flag_name", NULL, "filename",
                     &current_storage, &defvalue_storage);
   CommandLineFlagInfo fi;
   EXPECT_TRUE(GetCommandLineFlagInfo("flag_name", &fi));
